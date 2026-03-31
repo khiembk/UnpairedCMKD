@@ -6,15 +6,12 @@ import os
 import codecs
 import csv
 from copy import deepcopy
-# from utils.model import ImageNet, AudioNet
-# from utils.model_res import ImageNet, AudioNet
 from utils.model_res_usingtimm import ImageNet, AudioNet, Projector
 from utils.dist_utils import *
 import time
 import torch.nn.functional as F
 import geomloss
 from utils.AVEDataset import AVEDataset
-# from utils.VGGSoundDataset import VGGSound
 from torch.utils.data import DataLoader
 import math
 import wandb
@@ -50,7 +47,6 @@ def seed(seed=0):
 
 
 def evaluate(loader, device, net, in_type):
-    # type == 0: image input; type == 1: audio input; type == 2: both input
     correct, v_loss, total, logits = 0, 0, 0, 0
     net.eval()
     with torch.no_grad():
@@ -312,10 +308,8 @@ def train_network_distill_unpair_sumall(stu_type, tea_model, epochs, loader, net
             # print(stu_f.shape)
             CE_loss = F.cross_entropy(outputs, labels, reduction='none')
 
-            # Tính FA?
             
             batch_size = stu_f.size(0)
-            # chia các mẫu cho 1/N
             a = torch.ones(batch_size, device = stu_f.device) / batch_size
             b = torch.ones(batch_size, device = tea_f.device) / batch_size
 
@@ -332,15 +326,14 @@ def train_network_distill_unpair_sumall(stu_type, tea_model, epochs, loader, net
             FA_loss = torch.mean(FA_loss)
             
 
-            # Tinh LA?
             stu_latent_2_tea = tea_model.fc(stu_f)
             log_probs_s = F.log_softmax(outputs, dim=-1) #log(p_S)
             log_probs_t = F.log_softmax(stu_latent_2_tea, dim=-1) #log(p_T)
 
-            probs_t = F.softmax(stu_latent_2_tea, dim=-1)          # p_T (để làm kappa) boi vi 
-            kappa = probs_t.detach() # boi vi khi ma nhan khong dung thi nhan vao expect la 0 roi nen co the coi la D^T(y|z) cho de tinh
-            log_ratio_matrix = log_probs_s - kappa * log_probs_t  # log( p_S / p_T^kappa ) = log(p_S) - kappa * log(p_T)
-            LA_loss = F.nll_loss(log_ratio_matrix, labels) # label = 0 nếu không đúng class, bằng 1 nếu đúng
+            probs_t = F.softmax(stu_latent_2_tea, dim=-1)          
+            kappa = probs_t.detach() 
+            log_ratio_matrix = log_probs_s - kappa * log_probs_t  
+            LA_loss = F.nll_loss(log_ratio_matrix, labels)
     
 
 
@@ -445,7 +438,6 @@ def train_network_distill_unpair_bilevel(stu_type, tea_model, epochs, loader, ne
 
 
 
-            # copy student network
             net_tmp = deepcopy(net)
             net_tmp.train()
 
@@ -463,10 +455,7 @@ def train_network_distill_unpair_bilevel(stu_type, tea_model, epochs, loader, ne
                 elif stu_type == 1:
                     outputs, stu_f_tmp, stu_fit = net_tmp(aud_inputs_cln)
                     pseu_label, tea_f, tea_fit = tea_model(img_inputs_cln)
-                
-                # Tính FA Loss 
-                # Loi khong giam duoc FA do gap qua lon, cai FA_loss luon la 220-250 -> normalize
-                # Vi wasserstein dung de sap xep
+
                 
                 batch_size = stu_f_tmp.size(0)
                 a = torch.ones(batch_size, device=stu_f_tmp.device) / batch_size
@@ -488,17 +477,15 @@ def train_network_distill_unpair_bilevel(stu_type, tea_model, epochs, loader, ne
             for _ in range(n2_steps):
                 optimizer_tmp.zero_grad()
 
-                # forward lai net_tmp sau khi cap nhat
                 if stu_type == 0:
                     stu_f_tmp, _ = net_tmp.forward_encoder(img_inputs_cln)
-                    stu_f_fixed = stu_f_tmp.detach() # ngắt gradient tmp
+                    stu_f_fixed = stu_f_tmp.detach() 
                     outputs_tmp = net_tmp.forward_head(stu_f_fixed)
                 elif stu_type == 1:
                     stu_f_tmp, _ = net_tmp.forward_encoder(aud_inputs_cln)
-                    stu_f_fixed = stu_f_tmp.detach() # ngắt gradient tmp
+                    stu_f_fixed = stu_f_tmp.detach() 
                     outputs_tmp = net_tmp.forward_head(stu_f_fixed)
                 
-                # Tính LA Loss
                 with torch.no_grad():
                     stu_latent_2_tea = tea_model.fc(stu_f_tmp) # Teacher view on Student z
                 
@@ -506,24 +493,18 @@ def train_network_distill_unpair_bilevel(stu_type, tea_model, epochs, loader, ne
                 probs_s = F.softmax(outputs_tmp, dim=-1)
                 probs_t = F.softmax(stu_latent_2_tea, dim=-1)
             
-                #select target class prob as kappa 
                 kappa = probs_t.gather(dim=1, index=labels.unsqueeze(1)).squeeze(1)
                 
                 LA_loss = (Cross_Entropy(outputs_tmp,labels) - kappa*Cross_Entropy(stu_latent_2_tea,labels)).mean()
 
-                # Update net_tmp lần 2
                 LA_loss.backward()
                 optimizer_tmp.step()
                     
-            # update net va lay cai output cuoi cua temp
             if stu_type == 0:   
-                # outputs = self.fc(outputs_128)
-                # outputs: [b, num_class], [b, 128]
+
                 outputs_final_tmp, outputs_128, stu_fit = net_tmp(img_inputs_cln)
-                # outputs_final_tmp, outputs_128, stu_fit = net(img_inputs_cln)
             elif stu_type == 1:
                 outputs_final_tmp, outputs_128, stu_fit = net_tmp(aud_inputs_cln)
-                # outputs_final_tmp, outputs_128, stu_fit = net(aud_inputs_cln)
             else:
                 raise ValueError("Undefined training type in distilled training")
             
@@ -532,27 +513,19 @@ def train_network_distill_unpair_bilevel(stu_type, tea_model, epochs, loader, ne
             
             # optimizer_tmp.zero_grad()
             net_tmp.zero_grad()
-            CE_loss.backward() # tinh gradient cong vao net_tmp.parameters().grad
+            CE_loss.backward() 
 
-            optimizer.zero_grad() # xoa gradient cu
-            # Chep gradient tu mang tmp vao real, chi co moi celoss thoi
+            optimizer.zero_grad() 
             for real_param, tmp_param in zip(net.parameters(), net_tmp.parameters()):
                 if tmp_param.grad is not None:
                     real_param.grad = tmp_param.grad.clone()
             optimizer.step()
 
-            # sao chep cac tham so thong ke, running mean/ running var
             with torch.no_grad():
                 for real_buffer, tmp_buffer in zip(net.buffers(), net_tmp.buffers()):
                     real_buffer.data.copy_(tmp_buffer.data)
 
-            # loss = CE_loss.mean().item() + FA_loss.item() + LA_loss.item()
-            # loss = CE_loss.mean().item()
-            # print(loss.item(), CE_loss.mean(), FA_loss, LA_loss)
-            # loss.backward()
-            # optimizer.step()
             lr = adjust_lr(iter=epoch, optimizer=optimizer)
-            # lr_scheduler.step()
             train_loss += CE_loss.item()
             CE_loss_total += CE_loss.item()
             FA_loss_total += FA_loss.item()
@@ -871,10 +844,7 @@ def train_network_distill_unpair_fea(stu_type, tea_model, epochs, loader, net, d
             img_inputs_cln, aud_inputs_cln, labels = img_inputs_cln.to(device), aud_inputs_cln.to(device), labels.to(
                 device)
 
-            # output and net == student
             if stu_type == 0:
-                # outputs = self.fc(outputs_128)
-                # outputs: [b, num_class], [b, 128]
                 outputs, outputs_128, stu_fit = net(img_inputs_cln)
                 pseu_label, pseu_label_128, tea_fit = tea_model(aud_inputs_cln)
                 labels = labels
@@ -891,13 +861,10 @@ def train_network_distill_unpair_fea(stu_type, tea_model, epochs, loader, net, d
             tea_f = pseu_label_128
 
 
-            # print(stu_f.shape)
             CE_loss = F.cross_entropy(outputs, labels, reduction='none')
 
-            # Tính FA?
             
             batch_size = stu_f.size(0)
-            # chia các mẫu cho 1/N
             a = torch.ones(batch_size, device = stu_f.device) / batch_size
             b = torch.ones(batch_size, device = tea_f.device) / batch_size
 
@@ -908,28 +875,12 @@ def train_network_distill_unpair_fea(stu_type, tea_model, epochs, loader, net, d
 
             M = 1 - torch.matmul(stu_f_norm, tea_f_norm.transpose(0, 1))
             M = torch.clamp(M, min=0.0)
-            # print("Requires Grad:", stu_f_tmp.requires_grad)
-            # print("Grad Fn:", stu_f_tmp.grad_fn)
             FA_loss = ot.sinkhorn2(a, b, M, reg=0.1, numItermax=100, method='sinkhorn')
             FA_loss = torch.mean(FA_loss)
-            
-
-            # Tinh LA?
-            # stu_latent_2_tea = tea_model.fc(stu_f)
-            # log_probs_s = F.log_softmax(outputs, dim=-1) #log(p_S)
-            # log_probs_t = F.log_softmax(stu_latent_2_tea, dim=-1) #log(p_T)
-
-            # probs_t = F.softmax(stu_latent_2_tea, dim=-1)          # p_T (để làm kappa) boi vi 
-            # kappa = probs_t.detach() # boi vi khi ma nhan khong dung thi nhan vao expect la 0 roi nen co the coi la D^T(y|z) cho de tinh
-            # log_ratio_matrix = log_probs_s - kappa * log_probs_t  # log( p_S / p_T^kappa ) = log(p_S) - kappa * log(p_T)
-            # LA_loss = F.nll_loss(log_ratio_matrix, labels) # label = 0 nếu không đúng class, bằng 1 nếu đúng
     
 
 
-            # loss = CE_loss.mean() + FA_loss + LA_loss
             loss = CE_loss.mean() + FA_loss
-            # print(loss.item(), CE_loss.mean(), FA_loss, LA_loss)
-            # loss = CE_loss.mean() 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=5.0)
             optimizer.step()
@@ -1009,12 +960,10 @@ def pre_train_models(stu_type, tea_type, loader, epochs, learning_rate, device, 
 
 
     optimizer = torch.optim.SGD(list(tea_model.parameters()) + list(stu_model.parameters()), lr=learning_rate, momentum=0.9)
-    # optimizer = torch.optim.SGD(list(tea_model.parameters()), lr=learning_rate, momentum=0.9)
     val_best_acc, test_best_acc, val_best_acc_s, test_best_acc_s, tea_model_best, stu_model_best = 0, 0, 0, 0, 0, 0
     for epoch in range(epochs):
         tea_model.train()
         stu_model.train()
-        # train_loss = 0.0
         loss1, loss2, loss3 = 0, 0, 0
         for i, data in enumerate(loader['train']):
             img_inputs_cln, aud_inputs_cln, labels = data['image'], data['audio'], data['label']

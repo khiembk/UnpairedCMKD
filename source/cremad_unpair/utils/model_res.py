@@ -130,7 +130,6 @@ class FCReg(nn.Module):
 
 
 class ImageNet(nn.Module):
-    """ImageNet: Xử lý nhánh hình ảnh"""
     def __init__(self, args):
         super(ImageNet, self).__init__()
         self.dataset = 'CREMAD'
@@ -193,7 +192,6 @@ class ImageNet(nn.Module):
         return feature_vector, []
     
 class AudioNet(nn.Module):
-    """AudioNet: Xử lý nhánh âm thanh"""
     def __init__(self, args):
         super(AudioNet, self).__init__()
         self.args = args

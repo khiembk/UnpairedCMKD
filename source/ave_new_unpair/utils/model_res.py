@@ -165,7 +165,7 @@ class ResNet(nn.Module):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
-        f0 = x # (Optional: Nếu cần intermediate feature thì return thêm)
+        f0 = x 
         x = self.maxpool(x)
 
         x = self.layer1(x)

@@ -6,21 +6,17 @@ import os
 import codecs
 import csv
 from copy import deepcopy
-# from utils.model import ImageNet, AudioNet
-from utils.model_res import ImageNet, AudioNet
+from utils.model_res_usingtimm import ImageNet, AudioNet, Projector
 from utils.dist_utils import *
 import time
 import torch.nn.functional as F
 import geomloss
-from utils.RavvdessDataset import RavvdessDataset
-from utils.RavvdessDatasetChallenging import RavvdessDatasetChallenging, CHALLENGE_PRESETS
-# from utils.VGGSoundDataset import VGGSound
+from utils.AVEDataset import AVEDataset
 from torch.utils.data import DataLoader
 import math
 import wandb
 from scipy.stats.stats import kendalltau
 import ot
-import time
 
 
 
@@ -51,7 +47,6 @@ def seed(seed=0):
 
 
 def evaluate(loader, device, net, in_type):
-    # type == 0: image input; type == 1: audio input; type == 2: both input
     correct, v_loss, total, logits = 0, 0, 0, 0
     net.eval()
     with torch.no_grad():
@@ -88,17 +83,10 @@ def evaluate_allacc(loader, device, net, in_type):
 
 
 def gen_data(data_dir, batch_size, num_workers, args):
-    audio_dir = os.path.join(data_dir, 'aud_features')
-    image_dir = os.path.join(data_dir, 'vid_features')
 
-    data_file = os.path.join(data_dir, 'data_file')
-    train_file = os.path.join(data_file, 'spa_dl.csv')
-    val_file = os.path.join(data_file, 'spa_val.csv')
-    test_file = os.path.join(data_file, 'spa_test.csv')
-
-    train_dataset = RavvdessDataset(csv_path=train_file, audio_dir=audio_dir, image_dir=image_dir, mode='train')
-    test_dataset = RavvdessDataset(csv_path=test_file, audio_dir=audio_dir, image_dir=image_dir, mode='test')
-    val_dataset = RavvdessDataset(csv_path=val_file, audio_dir=audio_dir, image_dir=image_dir, mode='val')
+    train_dataset = AVEDataset(args, mode='train')
+    test_dataset = AVEDataset(args, mode='test')
+    val_dataset = AVEDataset(args, mode='val')
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)  # 计算机的内存充足的时候，可以设置pin_memory=True
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
@@ -108,62 +96,6 @@ def gen_data(data_dir, batch_size, num_workers, args):
               'test': test_dataloader}
 
     return loader
-
-
-def gen_data_challenging(data_dir, batch_size, num_workers, args):
-    """Create dataloaders with challenging unpaired settings.
-
-    Uses args.challenge_preset  (e.g. 'mild', 'moderate', 'hard')
-    or individual flags: --marginal_mismatch, --domain_shift, --label_imbalance, etc.
-    """
-    audio_dir = os.path.join(data_dir, 'aud_features')
-    image_dir = os.path.join(data_dir, 'vid_features')
-    data_file = os.path.join(data_dir, 'data_file')
-    train_file = os.path.join(data_file, 'spa_dl.csv')
-    val_file   = os.path.join(data_file, 'spa_val.csv')
-    test_file  = os.path.join(data_file, 'spa_test.csv')
-
-    # Resolve challenge kwargs from preset or individual flags
-    preset = getattr(args, 'challenge_preset', 'clean')
-    if preset in CHALLENGE_PRESETS:
-        challenge_kw = CHALLENGE_PRESETS[preset].copy()
-        print(f'[DataLoader] Using challenge preset: {preset}')
-    else:
-        challenge_kw = {}
-        print(f'[DataLoader] Unknown preset "{preset}", using individual flags')
-
-    # Individual flags override the preset
-    if getattr(args, 'marginal_mismatch', False):
-        challenge_kw['marginal_mismatch'] = True
-        challenge_kw['marginal_ratio'] = getattr(args, 'marginal_ratio', 0.5)
-    if getattr(args, 'domain_shift', False):
-        challenge_kw['domain_shift'] = True
-        challenge_kw['domain_shift_level'] = getattr(args, 'domain_shift_level', 0.5)
-    if getattr(args, 'label_imbalance', False):
-        challenge_kw['label_imbalance'] = True
-        challenge_kw['imbalance_modality'] = getattr(args, 'imbalance_modality', 'audio')
-        challenge_kw['imbalance_factor'] = getattr(args, 'imbalance_factor', 10.0)
-
-    train_dataset = RavvdessDatasetChallenging(
-        csv_path=train_file, audio_dir=audio_dir, image_dir=image_dir,
-        mode='train', **challenge_kw
-    )
-    # val/test always clean & paired
-    val_dataset  = RavvdessDatasetChallenging(
-        csv_path=val_file, audio_dir=audio_dir, image_dir=image_dir, mode='val'
-    )
-    test_dataset = RavvdessDatasetChallenging(
-        csv_path=test_file, audio_dir=audio_dir, image_dir=image_dir, mode='test'
-    )
-
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
-                                  num_workers=num_workers, pin_memory=True)
-    val_dataloader   = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
-                                  num_workers=num_workers, pin_memory=True)
-    test_dataloader  = DataLoader(test_dataset, batch_size=batch_size, shuffle=False,
-                                  num_workers=num_workers, pin_memory=True)
-
-    return {'train': train_dataloader, 'val': val_dataloader, 'test': test_dataloader}
 
 
 def ntkl(logits_student, logits_teacher, target, mask=None, criterion4=None, temperature=1):
@@ -342,7 +274,6 @@ def train_network_distill_unpair_sumall(stu_type, tea_model, epochs, loader, net
 
 
     for epoch in range(epochs):
-        epoch_start_time = time.time()
 
         train_loss = 0.0
         CE_loss_total = 0.0
@@ -374,6 +305,7 @@ def train_network_distill_unpair_sumall(stu_type, tea_model, epochs, loader, net
             stu_f = outputs_128
             tea_f = pseu_label_128
 
+            # print(stu_f.shape)
             CE_loss = F.cross_entropy(outputs, labels, reduction='none')
 
             
@@ -385,36 +317,40 @@ def train_network_distill_unpair_sumall(stu_type, tea_model, epochs, loader, net
             stu_f_norm = stu_f / (stu_f.norm(dim=1, keepdim=True) + eps)
             tea_f_norm = tea_f / (tea_f.norm(dim=1, keepdim=True) + eps)
 
+
             M = 1 - torch.matmul(stu_f_norm, tea_f_norm.transpose(0, 1))
             M = torch.clamp(M, min=0.0)
+            # print("Requires Grad:", stu_f_tmp.requires_grad)
+            # print("Grad Fn:", stu_f_tmp.grad_fn)
             FA_loss = ot.sinkhorn2(a, b, M, reg=0.1, numItermax=100, method='sinkhorn')
             FA_loss = torch.mean(FA_loss)
             
 
-     
             stu_latent_2_tea = tea_model.fc(stu_f)
-            log_probs_s = F.log_softmax(outputs, dim=-1) 
-            log_probs_t = F.log_softmax(stu_latent_2_tea, dim=-1) 
+            log_probs_s = F.log_softmax(outputs, dim=-1) #log(p_S)
+            log_probs_t = F.log_softmax(stu_latent_2_tea, dim=-1) #log(p_T)
 
-            probs_t = F.softmax(stu_latent_2_tea, dim=-1)        
-            kappa = probs_t.detach()
+            probs_t = F.softmax(stu_latent_2_tea, dim=-1)          
+            kappa = probs_t.detach() 
             log_ratio_matrix = log_probs_s - kappa * log_probs_t  
             LA_loss = F.nll_loss(log_ratio_matrix, labels)
     
 
 
             loss = CE_loss.mean() + FA_loss + LA_loss
-
+            # print(loss.item(), CE_loss.mean(), FA_loss, LA_loss)
+            # loss = CE_loss.mean() 
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=5.0) 
+            torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=5.0)
             optimizer.step()
             lr = adjust_lr(iter=epoch, optimizer=optimizer)
+            # lr_scheduler.step()
             train_loss += loss.item()
             CE_loss_total += CE_loss.mean().item()
             FA_loss_total += FA_loss.item()
             LA_loss_total += LA_loss.item()
 
-        epoch_duration = time.time() - epoch_start_time
+
 
         if epoch >= 1:
             _, train_acc = evaluate(loader['train'], device, net, stu_type)
@@ -443,8 +379,7 @@ def train_network_distill_unpair_sumall(stu_type, tea_model, epochs, loader, net
             test_best_acc_t = test_acc_t
 
         wandb.log({'trainloss': train_loss / len(loader['train']), 'CE_loss_total': CE_loss_total / len(loader['train']), \
-                    'FA_loss_total': FA_loss_total / len(loader['train']), 'LA_loss_total': LA_loss_total / len(loader['train']),
-                    'epoch_duration': epoch_duration})
+                    'FA_loss_total': FA_loss_total / len(loader['train']), 'LA_loss_total': LA_loss_total / len(loader['train'])})
         wandb.log({'train_acc': train_acc, 'val_acc': val_acc, 'test_acc': test_acc, \
                    'train_acc_t': train_acc_t, 'val_acc_t': val_acc_t, 'test_acc_t': test_acc_t})
         print(f"Epoch | All epochs: {epoch} | {epochs}")
@@ -454,7 +389,6 @@ def train_network_distill_unpair_sumall(stu_type, tea_model, epochs, loader, net
         print(f"teacher: Train | Val | Test Accuracy {train_acc_t:.3f} | {val_acc_t:.3f} | {test_acc_t:.3f}")
         print(f"Best Val | Test Accuracy | {val_best_acc:.3f} | {test_best_acc:.3f}")
         print(f"Best Teacher Val | Test Accuracy | {val_best_acc_t:.3f} | {test_best_acc_t:.3f}\n", '-' * 70)
-        print(f"epoch_duration: {epoch_duration}")
 
     print(f'Training finish! Best Val | Test Accuracy | {val_best_acc:.3f} | {test_best_acc:.3f}')
     print(f'Training finish! Best Teacher Val | Test Accuracy | {val_best_acc_t:.3f} | {test_best_acc_t:.3f}')
@@ -470,7 +404,7 @@ def train_network_distill_unpair_sumall(stu_type, tea_model, epochs, loader, net
 
     return val_best_acc, test_best_acc, val_best_acc_t, test_best_acc_t
 
-def train_network_distill_unpair_bilevel(stu_type, tea_model, epochs, loader, net, device, optimizer, warmup_lr_scheduler, main_lr_scheduler, lr_scheduler, args, tea, stu, transfer_kernel):
+def train_network_distill_unpair_bilevel(stu_type, tea_model, epochs, loader, net, device, optimizer, warmup_lr_scheduler, main_lr_scheduler, lr_scheduler, args, tea, stu):
     save_model = True
     val_best_acc, test_best_acc, val_best_acc_t, test_best_acc_t = 0, 0, 0, 0
     model_best = net
@@ -486,11 +420,10 @@ def train_network_distill_unpair_bilevel(stu_type, tea_model, epochs, loader, ne
             param.requires_grad = False
     
     # hyperparameter
-    n1_steps = 1
+    n1_steps = 2
     n2_steps = 1
 
     for epoch in range(epochs):
-        epoch_start_time = time.time()
 
         train_loss = 0.0
         CE_loss_total = 0.0
@@ -503,12 +436,13 @@ def train_network_distill_unpair_bilevel(stu_type, tea_model, epochs, loader, ne
             img_inputs_cln, aud_inputs_cln, labels = img_inputs_cln.to(device), aud_inputs_cln.to(device), labels.to(
                 device)
 
-            # copy student network
+
+
             net_tmp = deepcopy(net)
             net_tmp.train()
 
             current_lr = optimizer.param_groups[0]['lr']
-            optimizer_tmp = torch.optim.SGD(net_tmp.parameters(), lr = current_lr)
+            optimizer_tmp = torch.optim.SGD(list(net_tmp.parameters()), lr = current_lr)
 
             for _ in range(n1_steps):
                 optimizer_tmp.zero_grad()
@@ -521,20 +455,23 @@ def train_network_distill_unpair_bilevel(stu_type, tea_model, epochs, loader, ne
                 elif stu_type == 1:
                     outputs, stu_f_tmp, stu_fit = net_tmp(aud_inputs_cln)
                     pseu_label, tea_f, tea_fit = tea_model(img_inputs_cln)
-            
+
                 
                 batch_size = stu_f_tmp.size(0)
                 a = torch.ones(batch_size, device=stu_f_tmp.device) / batch_size
                 b = torch.ones(batch_size, device=tea_f.device) / batch_size
+
                 
 
                 stu_f_norm = torch.nn.functional.normalize(stu_f_tmp, p=2, dim=1)
                 tea_f_norm = torch.nn.functional.normalize(tea_f, p=2, dim=1)
 
                 M = 1 - torch.matmul(stu_f_norm, tea_f_norm.transpose(0, 1))
+
                 FA_loss = ot.sinkhorn2(a, b, M, reg=0.1, numItermax=100)
                 FA_loss = torch.mean(FA_loss)
                 FA_loss.backward()
+
                 optimizer_tmp.step()
 
             for _ in range(n2_steps):
@@ -546,25 +483,17 @@ def train_network_distill_unpair_bilevel(stu_type, tea_model, epochs, loader, ne
                     outputs_tmp = net_tmp.forward_head(stu_f_fixed)
                 elif stu_type == 1:
                     stu_f_tmp, _ = net_tmp.forward_encoder(aud_inputs_cln)
-                    stu_f_fixed = stu_f_tmp.detach()
+                    stu_f_fixed = stu_f_tmp.detach() 
                     outputs_tmp = net_tmp.forward_head(stu_f_fixed)
                 
-
                 with torch.no_grad():
-                    stu_latent_2_tea = tea_model.fc(stu_f_tmp) 
+                    stu_latent_2_tea = tea_model.fc(stu_f_tmp) # Teacher view on Student z
                 
                 Cross_Entropy = torch.nn.CrossEntropyLoss(reduction='none')
                 probs_s = F.softmax(outputs_tmp, dim=-1)
                 probs_t = F.softmax(stu_latent_2_tea, dim=-1)
             
                 kappa = probs_t.gather(dim=1, index=labels.unsqueeze(1)).squeeze(1)
-
-                if transfer_kernel == 2:
-                    pass
-                elif transfer_kernel == 0:
-                    kappa = torch.zeros_like(kappa)
-                elif transfer_kernel == 1:
-                    kappa = torch.ones_like(kappa)
                 
                 LA_loss = (Cross_Entropy(outputs_tmp,labels) - kappa*Cross_Entropy(stu_latent_2_tea,labels)).mean()
 
@@ -579,10 +508,13 @@ def train_network_distill_unpair_bilevel(stu_type, tea_model, epochs, loader, ne
             else:
                 raise ValueError("Undefined training type in distilled training")
             
+            # optimizer.zero_grad()
             CE_loss = F.cross_entropy(outputs_final_tmp, labels)
             
+            # optimizer_tmp.zero_grad()
             net_tmp.zero_grad()
-            CE_loss.backward()
+            CE_loss.backward() 
+
             optimizer.zero_grad() 
             for real_param, tmp_param in zip(net.parameters(), net_tmp.parameters()):
                 if tmp_param.grad is not None:
@@ -594,13 +526,12 @@ def train_network_distill_unpair_bilevel(stu_type, tea_model, epochs, loader, ne
                     real_buffer.data.copy_(tmp_buffer.data)
 
             lr = adjust_lr(iter=epoch, optimizer=optimizer)
-            # lr_scheduler.step()
             train_loss += CE_loss.item()
             CE_loss_total += CE_loss.item()
             FA_loss_total += FA_loss.item()
             LA_loss_total += LA_loss.item()
 
-        epoch_duration = time.time() - epoch_start_time
+
 
         if epoch >= 1:
             _, train_acc = evaluate(loader['train'], device, net, stu_type)
@@ -631,8 +562,7 @@ def train_network_distill_unpair_bilevel(stu_type, tea_model, epochs, loader, ne
         wandb.log({'trainloss': train_loss / len(loader['train']), 'CE_loss_total': CE_loss_total / len(loader['train']), \
                     'FA_loss_total': FA_loss_total / len(loader['train']), 'LA_loss_total': LA_loss_total / len(loader['train'])})
         wandb.log({'train_acc': train_acc, 'val_acc': val_acc, 'test_acc': test_acc, \
-                   'train_acc_t': train_acc_t, 'val_acc_t': val_acc_t, 'test_acc_t': test_acc_t
-                   ,'epoch_duration': epoch_duration})
+                   'train_acc_t': train_acc_t, 'val_acc_t': val_acc_t, 'test_acc_t': test_acc_t})
         print(f"Epoch | All epochs: {epoch} | {epochs}")
         print(
             f"Train Loss: {train_loss / len(loader['train']):.3f}")
@@ -640,8 +570,9 @@ def train_network_distill_unpair_bilevel(stu_type, tea_model, epochs, loader, ne
         print(f"teacher: Train | Val | Test Accuracy {train_acc_t:.3f} | {val_acc_t:.3f} | {test_acc_t:.3f}")
         print(f"Best Val | Test Accuracy | {val_best_acc:.3f} | {test_best_acc:.3f}")
         print(f"Best Teacher Val | Test Accuracy | {val_best_acc_t:.3f} | {test_best_acc_t:.3f}\n", '-' * 70)
-        print(f'epoch_duration: {epoch_duration}')
 
+        torch.cuda.empty_cache()
+        
     print(f'Training finish! Best Val | Test Accuracy | {val_best_acc:.3f} | {test_best_acc:.3f}')
     print(f'Training finish! Best Teacher Val | Test Accuracy | {val_best_acc_t:.3f} | {test_best_acc_t:.3f}')
 
@@ -656,220 +587,7 @@ def train_network_distill_unpair_bilevel(stu_type, tea_model, epochs, loader, ne
 
     return val_best_acc, test_best_acc, val_best_acc_t, test_best_acc_t
 
-def pairwise_ot_cost(stu_f, tea_f, metric="chordal", L=None, eps=1e-6):
-    if metric == "l2":
-        M = torch.cdist(stu_f, tea_f, p=2)
 
-    elif metric == "l1":
-        M = torch.cdist(stu_f, tea_f, p=1)
-
-    elif metric == "chordal":
-        stu = F.normalize(stu_f, p=2, dim=1)
-        tea = F.normalize(tea_f, p=2, dim=1)
-        M = torch.cdist(stu, tea, p=2)
-
-
-    elif metric == "cosine":
-        stu = F.normalize(stu_f, p=2, dim=1)
-        tea = F.normalize(tea_f, p=2, dim=1)
-        M = 1.0 - stu @ tea.T
-
-    else:
-        raise ValueError(f"Unknown metric: {metric}")
-
-    return M
-def train_network_distill_unpair_bilevel_with_different_metric(stu_type, tea_model, epochs, loader, net, device, optimizer, warmup_lr_scheduler, main_lr_scheduler, lr_scheduler, args, tea, stu,  metric= "chordal"):
-    save_model = True
-    val_best_acc, test_best_acc, val_best_acc_t, test_best_acc_t = 0, 0, 0, 0
-    model_best = net
-    criterion3 = torch.nn.KLDivLoss(reduction='batchmean')
-    criterion4 = torch.nn.KLDivLoss(reduction='none')
-    iter = 0
-    net.train()
-    # tea_model.train()
-    tea_model.eval()
-    for name, param in tea_model.named_parameters():
-        # if 'layer4' not in name and 'layer4' not in name and 'fc' not in name:
-        # if 'fc' not in name:
-            param.requires_grad = False
-    
-    # hyperparameter
-    n1_steps = 1
-    n2_steps = 1
-
-    for epoch in range(epochs):
-        epoch_start_time = time.time()
-
-        train_loss = 0.0
-        CE_loss_total = 0.0
-        FA_loss_total = 0.0
-        LA_loss_total = 0.0
-
-        for i, data in enumerate(loader['train']):
-            iter = iter + 1
-            img_inputs_cln, aud_inputs_cln, labels = data['image'], data['audio'], data['label']
-            img_inputs_cln, aud_inputs_cln, labels = img_inputs_cln.to(device), aud_inputs_cln.to(device), labels.to(
-                device)
-
-            # copy student network
-            net_tmp = deepcopy(net)
-            net_tmp.train()
-
-            current_lr = optimizer.param_groups[0]['lr']
-            optimizer_tmp = torch.optim.SGD(net_tmp.parameters(), lr = current_lr)
-
-            for _ in range(n1_steps):
-                optimizer_tmp.zero_grad()
-                if stu_type == 0:
-                    # outputs = self.fc(outputs_128)
-                    # outputs: [b, num_class], [b, 128]
-                    outputs, stu_f_tmp, stu_fit = net_tmp(img_inputs_cln)
-                    pseu_label, tea_f, tea_fit = tea_model(aud_inputs_cln)
-                    
-                elif stu_type == 1:
-                    outputs, stu_f_tmp, stu_fit = net_tmp(aud_inputs_cln)
-                    pseu_label, tea_f, tea_fit = tea_model(img_inputs_cln)
-                
-               
-                
-                batch_size = stu_f_tmp.size(0)
-                a = torch.ones(batch_size, device=stu_f_tmp.device) / batch_size
-                b = torch.ones(batch_size, device=tea_f.device) / batch_size
-                
-                
-                M = pairwise_ot_cost(stu_f_tmp, tea_f, metric= metric)
-               
-                FA_loss = ot.sinkhorn2(a, b, M, reg=0.1, numItermax=100)
-                FA_loss = torch.mean(FA_loss)
-                FA_loss.backward()
-              
-                optimizer_tmp.step()
-
-            for _ in range(n2_steps):
-                optimizer_tmp.zero_grad()
-
-                if stu_type == 0:
-                    stu_f_tmp, _ = net_tmp.forward_encoder(img_inputs_cln)
-                    stu_f_fixed = stu_f_tmp.detach() 
-                    outputs_tmp = net_tmp.forward_head(stu_f_fixed)
-                elif stu_type == 1:
-                    stu_f_tmp, _ = net_tmp.forward_encoder(aud_inputs_cln)
-                    stu_f_fixed = stu_f_tmp.detach() 
-                    outputs_tmp = net_tmp.forward_head(stu_f_fixed)
-                
-                with torch.no_grad():
-                    stu_latent_2_tea = tea_model.fc(stu_f_tmp) 
-                
-                Cross_Entropy = torch.nn.CrossEntropyLoss(reduction='none')
-                probs_s = F.softmax(outputs_tmp, dim=-1)
-                probs_t = F.softmax(stu_latent_2_tea, dim=-1)
-            
-                kappa = probs_t.gather(dim=1, index=labels.unsqueeze(1)).squeeze(1)
-                
-                LA_loss = (Cross_Entropy(outputs_tmp,labels) - kappa*Cross_Entropy(stu_latent_2_tea,labels)).mean()
-
-                LA_loss.backward()
-                optimizer_tmp.step()
-                    
-            # update net va lay cai output cuoi cua temp
-            if stu_type == 0:   
-                # outputs = self.fc(outputs_128)
-                # outputs: [b, num_class], [b, 128]
-                outputs_final_tmp, outputs_128, stu_fit = net_tmp(img_inputs_cln)
-                # outputs_final_tmp, outputs_128, stu_fit = net(img_inputs_cln)
-            elif stu_type == 1:
-                outputs_final_tmp, outputs_128, stu_fit = net_tmp(aud_inputs_cln)
-                # outputs_final_tmp, outputs_128, stu_fit = net(aud_inputs_cln)
-            else:
-                raise ValueError("Undefined training type in distilled training")
-            
-            # optimizer.zero_grad()
-            CE_loss = F.cross_entropy(outputs_final_tmp, labels)
-            
-            # optimizer_tmp.zero_grad()
-            net_tmp.zero_grad()
-            CE_loss.backward() # tinh gradient cong vao net_tmp.parameters().grad
-
-            optimizer.zero_grad() # xoa gradient cu
-            # Chep gradient tu mang tmp vao real, chi co moi celoss thoi
-            for real_param, tmp_param in zip(net.parameters(), net_tmp.parameters()):
-                if tmp_param.grad is not None:
-                    real_param.grad = tmp_param.grad.clone()
-            optimizer.step()
-
-            # sao chep cac tham so thong ke, running mean/ running var
-            with torch.no_grad():
-                for real_buffer, tmp_buffer in zip(net.buffers(), net_tmp.buffers()):
-                    real_buffer.data.copy_(tmp_buffer.data)
-
-            # loss = CE_loss.mean().item() + FA_loss.item() + LA_loss.item()
-            # loss = CE_loss.mean().item()
-            # print(loss.item(), CE_loss.mean(), FA_loss, LA_loss)
-            # loss.backward()
-            # optimizer.step()
-            lr = adjust_lr(iter=epoch, optimizer=optimizer)
-            # lr_scheduler.step()
-            train_loss += CE_loss.item()
-            CE_loss_total += CE_loss.item()
-            FA_loss_total += FA_loss.item()
-            LA_loss_total += LA_loss.item()
-
-        epoch_duration = time.time() - epoch_start_time
-
-        if epoch >= 1:
-            _, train_acc = evaluate(loader['train'], device, net, stu_type)
-            val_loss, val_acc = evaluate(loader['val'], device, net, stu_type)
-            test_loss, test_acc = evaluate(loader['test'], device, net, stu_type)
-            _, train_acc_t = evaluate(loader['train'], device, tea_model, int(1-stu_type))
-            val_loss_t, val_acc_t = evaluate(loader['val'], device, tea_model, int(1-stu_type))
-            test_loss_t, test_acc_t = evaluate(loader['test'], device, tea_model, int(1-stu_type))
-
-            wandb.log({'train_acc': train_acc, 'val_acc': val_acc, 'test_acc': test_acc,\
-                       'train_acc_t': train_acc_t, 'val_acc_t': val_acc_t, 'test_acc_t': test_acc_t})
-        else:
-            _, train_acc = 0, 0
-            val_loss, val_acc = 0, 0
-            test_loss, test_acc = 0, 0
-            _, train_acc_t = 0, 0
-            val_loss_t, val_acc_t = 0, 0
-            test_loss_t, test_acc_t = 0, 0
-
-        if val_acc >= val_best_acc:
-            val_best_acc = val_acc
-            test_best_acc = test_acc
-            model_best = deepcopy(net)
-        if val_acc_t >= val_best_acc_t:
-            val_best_acc_t = val_acc_t
-            test_best_acc_t = test_acc_t
-
-        wandb.log({'trainloss': train_loss / len(loader['train']), 'CE_loss_total': CE_loss_total / len(loader['train']), \
-                    'FA_loss_total': FA_loss_total / len(loader['train']), 'LA_loss_total': LA_loss_total / len(loader['train'])})
-        wandb.log({'train_acc': train_acc, 'val_acc': val_acc, 'test_acc': test_acc, \
-                   'train_acc_t': train_acc_t, 'val_acc_t': val_acc_t, 'test_acc_t': test_acc_t
-                   ,'epoch_duration': epoch_duration})
-        print(f"Epoch | All epochs: {epoch} | {epochs}")
-        print(
-            f"Train Loss: {train_loss / len(loader['train']):.3f}")
-        print(f"Train | Val | Test Accuracy {train_acc:.3f} | {val_acc:.3f} | {test_acc:.3f}")
-        print(f"teacher: Train | Val | Test Accuracy {train_acc_t:.3f} | {val_acc_t:.3f} | {test_acc_t:.3f}")
-        print(f"Best Val | Test Accuracy | {val_best_acc:.3f} | {test_best_acc:.3f}")
-        print(f"Best Teacher Val | Test Accuracy | {val_best_acc_t:.3f} | {test_best_acc_t:.3f}\n", '-' * 70)
-        print(f'epoch_duration: {epoch_duration}')
-
-    print(f'Training finish! Best Val | Test Accuracy | {val_best_acc:.3f} | {test_best_acc:.3f}')
-    print(f'Training finish! Best Teacher Val | Test Accuracy | {val_best_acc_t:.3f} | {test_best_acc_t:.3f}')
-
-    if save_model:
-        os.makedirs('results/our', exist_ok=True)
-        model_path = os.path.join('results', 'our', 'distillednet_mod_' + str(stu_type) + '_' + str(
-            args.num_frame) + '_kdweight' + str(args.weight) + '_stu_acc_' + str(round(test_best_acc, 2)) + '_tea_acc_' \
-                                  + str(round(test_best_acc_t, 2)) + '.pkl')
-        torch.save(model_best.state_dict(), model_path)
-        print(
-            f'Saving best model to {model_path}, Best Val | Test Accuracy | {val_best_acc:.3f} | {test_best_acc:.3f}')
-
-    return val_best_acc, test_best_acc, val_best_acc_t, test_best_acc_t
-#################################################################################################################
 def train_network_distill_unpair_ce(stu_type, tea_model, epochs, loader, net, device, optimizer, warmup_lr_scheduler, main_lr_scheduler, lr_scheduler, args, tea, stu):
     save_model = True
     val_best_acc, test_best_acc, val_best_acc_t, test_best_acc_t = 0, 0, 0, 0
@@ -890,7 +608,6 @@ def train_network_distill_unpair_ce(stu_type, tea_model, epochs, loader, net, de
     # n2_steps = 1
 
     for epoch in range(epochs):
-        epoch_start_time = time.time()
 
         train_loss = 0.0
         CE_loss_total = 0.0
@@ -917,7 +634,7 @@ def train_network_distill_unpair_ce(stu_type, tea_model, epochs, loader, net, de
             loss = CE_loss
             # print(loss.item(), CE_loss.mean(), FA_loss, LA_loss)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=5.0) 
+            torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=5.0)
             optimizer.step()
             lr = adjust_lr(iter=epoch, optimizer=optimizer)
             # lr_scheduler.step()
@@ -926,7 +643,6 @@ def train_network_distill_unpair_ce(stu_type, tea_model, epochs, loader, net, de
             # FA_loss_total += FA_loss.item()
             # LA_loss_total += LA_loss.item()
 
-        epoch_duration = time.time() - epoch_start_time
 
 
         if epoch >= 1:
@@ -956,8 +672,7 @@ def train_network_distill_unpair_ce(stu_type, tea_model, epochs, loader, net, de
             test_best_acc_t = test_acc_t
 
         wandb.log({'trainloss': train_loss / len(loader['train']), 'CE_loss_total': CE_loss_total / len(loader['train']), \
-                    'FA_loss_total': FA_loss_total / len(loader['train']), 'LA_loss_total': LA_loss_total / len(loader['train']),
-                    'epoch_duration': epoch_duration})
+                    'FA_loss_total': FA_loss_total / len(loader['train']), 'LA_loss_total': LA_loss_total / len(loader['train'])})
         wandb.log({'train_acc': train_acc, 'val_acc': val_acc, 'test_acc': test_acc, \
                    'train_acc_t': train_acc_t, 'val_acc_t': val_acc_t, 'test_acc_t': test_acc_t})
         print(f"Epoch | All epochs: {epoch} | {epochs}")
@@ -967,7 +682,6 @@ def train_network_distill_unpair_ce(stu_type, tea_model, epochs, loader, net, de
         print(f"teacher: Train | Val | Test Accuracy {train_acc_t:.3f} | {val_acc_t:.3f} | {test_acc_t:.3f}")
         print(f"Best Val | Test Accuracy | {val_best_acc:.3f} | {test_best_acc:.3f}")
         print(f"Best Teacher Val | Test Accuracy | {val_best_acc_t:.3f} | {test_best_acc_t:.3f}\n", '-' * 70)
-        print(f"Epoch_duration: {epoch_duration}" )
 
     print(f'Training finish! Best Val | Test Accuracy | {val_best_acc:.3f} | {test_best_acc:.3f}')
     print(f'Training finish! Best Teacher Val | Test Accuracy | {val_best_acc_t:.3f} | {test_best_acc_t:.3f}')
@@ -1130,10 +844,7 @@ def train_network_distill_unpair_fea(stu_type, tea_model, epochs, loader, net, d
             img_inputs_cln, aud_inputs_cln, labels = img_inputs_cln.to(device), aud_inputs_cln.to(device), labels.to(
                 device)
 
-            # output and net == student
             if stu_type == 0:
-                # outputs = self.fc(outputs_128)
-                # outputs: [b, num_class], [b, 128]
                 outputs, outputs_128, stu_fit = net(img_inputs_cln)
                 pseu_label, pseu_label_128, tea_fit = tea_model(aud_inputs_cln)
                 labels = labels
@@ -1149,13 +860,11 @@ def train_network_distill_unpair_fea(stu_type, tea_model, epochs, loader, net, d
             stu_f = outputs_128
             tea_f = pseu_label_128
 
-            # print(stu_f.shape)
+
             CE_loss = F.cross_entropy(outputs, labels, reduction='none')
 
-            # Tính FA?
             
             batch_size = stu_f.size(0)
-            # chia các mẫu cho 1/N
             a = torch.ones(batch_size, device = stu_f.device) / batch_size
             b = torch.ones(batch_size, device = tea_f.device) / batch_size
 
@@ -1166,29 +875,14 @@ def train_network_distill_unpair_fea(stu_type, tea_model, epochs, loader, net, d
 
             M = 1 - torch.matmul(stu_f_norm, tea_f_norm.transpose(0, 1))
             M = torch.clamp(M, min=0.0)
-            # print("Requires Grad:", stu_f_tmp.requires_grad)
-            # print("Grad Fn:", stu_f_tmp.grad_fn)
             FA_loss = ot.sinkhorn2(a, b, M, reg=0.1, numItermax=100, method='sinkhorn')
             FA_loss = torch.mean(FA_loss)
-            
-
-            # Tinh LA?
-            # stu_latent_2_tea = tea_model.fc(stu_f)
-            # log_probs_s = F.log_softmax(outputs, dim=-1) #log(p_S)
-            # log_probs_t = F.log_softmax(stu_latent_2_tea, dim=-1) #log(p_T)
-
-            # probs_t = F.softmax(stu_latent_2_tea, dim=-1)          # p_T (để làm kappa) boi vi 
-            # kappa = probs_t.detach() # boi vi khi ma nhan khong dung thi nhan vao expect la 0 roi nen co the coi la D^T(y|z) cho de tinh
-            # log_ratio_matrix = log_probs_s - kappa * log_probs_t  # log( p_S / p_T^kappa ) = log(p_S) - kappa * log(p_T)
-            # LA_loss = F.nll_loss(log_ratio_matrix, labels) # label = 0 nếu không đúng class, bằng 1 nếu đúng
     
 
 
-            # loss = CE_loss.mean() + FA_loss + LA_loss
             loss = CE_loss.mean() + FA_loss
-            # print(loss.item(), CE_loss.mean(), FA_loss, LA_loss)
-            # loss = CE_loss.mean() 
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=5.0)
             optimizer.step()
             lr = adjust_lr(iter=epoch, optimizer=optimizer)
             # lr_scheduler.step()
@@ -1254,15 +948,22 @@ def train_network_distill_unpair_fea(stu_type, tea_model, epochs, loader, net, d
 
 def pre_train_models(stu_type, tea_type, loader, epochs, learning_rate, device, args, save_model=False):
     criterion = torch.nn.CrossEntropyLoss()
-    tea_model = ImageNet(args).to(device) if tea_type == 0 else AudioNet(args).to(device)
-    stu_model = ImageNet(args).to(device) if stu_type == 0 else AudioNet(args).to(device)
+    tea_model = ImageNet(args, pretrained=True).to(device) if tea_type == 0 else AudioNet(args, pretrained=True).to(device)
+    stu_model = ImageNet(args, pretrained=True).to(device) if stu_type == 0 else AudioNet(args, pretrained=True).to(device)
+
+    if stu_type == 0:
+        stu_arch = args.image_arch
+        tea_arch = args.audio_arch
+    else:
+        stu_arch = args.audio_arch
+        tea_arch = args.image_arch
+
+
     optimizer = torch.optim.SGD(list(tea_model.parameters()) + list(stu_model.parameters()), lr=learning_rate, momentum=0.9)
-    # optimizer = torch.optim.SGD(list(tea_model.parameters()), lr=learning_rate, momentum=0.9)
     val_best_acc, test_best_acc, val_best_acc_s, test_best_acc_s, tea_model_best, stu_model_best = 0, 0, 0, 0, 0, 0
     for epoch in range(epochs):
         tea_model.train()
         stu_model.train()
-        # train_loss = 0.0
         loss1, loss2, loss3 = 0, 0, 0
         for i, data in enumerate(loader['train']):
             img_inputs_cln, aud_inputs_cln, labels = data['image'], data['audio'], data['label']
@@ -1281,7 +982,7 @@ def pre_train_models(stu_type, tea_type, loader, epochs, learning_rate, device, 
             tmp1 = criterion(outputs1[0], labels)
             tmp2 = criterion(outputs2[0], labels)
             tmp3 = 0
-            loss = tmp2
+            loss = tmp2 + tmp1
             loss.backward()
             optimizer.step()
 
@@ -1315,9 +1016,9 @@ def pre_train_models(stu_type, tea_type, loader, epochs, learning_rate, device, 
 
     if save_model:
         os.makedirs('./results', exist_ok=True)
-        model_path_t = os.path.join('./results', 'teacher_mod_' + str(tea_type) + '_' + 'resnet18' + '_' + str(args.num_frame) + '_overlap.pkl')
+        model_path_t = os.path.join('./results', 'teacher_mod_' + str(tea_type) + '_' + tea_arch + '_' + str(args.num_frame) + '_overlap.pkl')
         torch.save(tea_model_best.state_dict(), model_path_t)
-        model_path_s = os.path.join('./results', 'student_mod_' + str(stu_type) + '_' + 'resnet18' + '_'+ str(args.num_frame) + '_overlap.pkl')
+        model_path_s = os.path.join('./results', 'student_mod_' + str(stu_type) + '_' + stu_arch + '_'+ str(args.num_frame) + '_overlap.pkl')
         torch.save(stu_model_best.state_dict(), model_path_s)
         print(f"Saving teacher and student model to {model_path_t} and {model_path_s}")
         print(f"Best Test acc: teacher: {test_best_acc:.2f} student: {test_best_acc_s:.2f}")
