@@ -87,7 +87,7 @@ def gen_data(data_dir, batch_size, num_workers, args):
     train_dataset = AVEDataset(args, mode='train')
     test_dataset = AVEDataset(args, mode='test')
     val_dataset = AVEDataset(args, mode='val')
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)  # 计算机的内存充足的时候，可以设置pin_memory=True
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)  
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
 
