@@ -13,7 +13,7 @@ from PIL import Image
 class RavvdessDataset(Dataset):
     def __init__(self, csv_path, audio_dir, image_dir, mode='train'):
         """
-        csv_path: Đường dẫn chính xác đến file csv (train/val/test) muốn load.
+        csv_path: Exact path to the csv file (train/val/test) to load.
         """
         self.df = pd.read_csv(csv_path, header=None) 
         self.audio_dir = audio_dir
