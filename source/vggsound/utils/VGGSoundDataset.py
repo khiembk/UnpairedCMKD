@@ -24,7 +24,6 @@ class VGGSound(Dataset):
         self.mode = mode
         classes = []
 
-        # sua
         self.data_root = '//data/AVE_Dataset'
 
         self.visual_feature_path = '//data/AVE_Dataset'
