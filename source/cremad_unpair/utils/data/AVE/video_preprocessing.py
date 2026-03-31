@@ -153,7 +153,7 @@ class AVE_dataset(object):
             save_dir = os.path.join(self.path_to_save, each_video[1])
             if not os.path.exists(save_dir):
                 os.mkdir(save_dir)
-            self.videoReader.video2frame_update(frame_save_path=save_dir, min_save_frame=10)  # 每个视频最少取10张图片
+            self.videoReader.video2frame_update(frame_save_path=save_dir, min_save_frame=10)
 
     def extractImage_SE(self):
 
@@ -171,7 +171,7 @@ class AVE_dataset(object):
             if not os.path.exists(save_dir):
                 os.mkdir(save_dir)
             self.videoReader.video2frame_update_SE(frame_save_path=save_dir, min_save_frame=10,
-                                                   start_t=start_t, end_t=end_t)  # 每个视频最少取10张图片
+                                                   start_t=start_t, end_t=end_t)
 
 
     def extractWav(self):

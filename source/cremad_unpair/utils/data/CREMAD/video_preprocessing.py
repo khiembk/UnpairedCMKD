@@ -106,7 +106,7 @@ class CRAMED_dataset(object):
             save_dir = os.path.join(self.path_to_save, each_video)
             if not os.path.exists(save_dir):
                 os.mkdir(save_dir)
-            self.videoReader.video2frame_update(frame_save_path=save_dir, min_save_frame=3)  # 每个视频最少取三张图片
+            self.videoReader.video2frame_update(frame_save_path=save_dir, min_save_frame=3)
 
     def extractWav(self):
         for each_audio in self.file_list:
